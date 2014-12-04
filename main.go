@@ -1,36 +1,46 @@
 package main
 
 import (
+	"flag"
 	"fmt"
 	"go/build"
 	"go/parser"
 	"go/token"
-	"os"
 	"strings"
 
 	"golang.org/x/tools/astutil"
 	"golang.org/x/tools/go/callgraph"
-	"golang.org/x/tools/go/callgraph/rta"
 	"golang.org/x/tools/go/loader"
+	"golang.org/x/tools/go/pointer"
 	"golang.org/x/tools/go/ssa"
 )
 
+var testpkg = flag.String("testpkg", "", "package which contains the stackcheck comments")
+
 func main() {
-	err := doCallGraph(os.Args[1])
+	flag.Parse()
+	if *testpkg == "" {
+		fmt.Println("must give testpkg")
+		return
+	}
+	err := doCallGraph(flag.Args())
 	if err != nil {
-		panic(err)
+		fmt.Println(err)
 	}
 }
 
-func doCallGraph(arg string) error {
+func doCallGraph(arg []string) error {
 	conf := loader.Config{
 		Build:         &build.Default,
 		SourceImports: true,
 		ParserMode:    parser.ParseComments,
 	}
+	if len(arg) == 0 {
+		arg = []string{*testpkg}
+	}
 
 	// Use the initial packages from the command line.
-	_, err := conf.FromArgs([]string{arg}, true)
+	_, err := conf.FromArgs(arg, true)
 	if err != nil {
 		return err
 	}
@@ -47,7 +57,11 @@ func doCallGraph(arg string) error {
 
 	const stkcheck = "stackcheck: "
 	// find all instances of // stackcheck: label
-	pkg := iprog.Imported[arg]
+	tpkg := iprog.ImportMap[*testpkg]
+	if tpkg == nil {
+		return fmt.Errorf("%s not in scope", *testpkg)
+	}
+	pkg := iprog.AllPackages[tpkg]
 	ssapkg := prog.Package(pkg.Pkg)
 
 	roots := make(map[string]*ssa.Function)
@@ -73,16 +87,36 @@ func doCallGraph(arg string) error {
 			}
 		}
 	}
-	r := []*ssa.Function{}
-	for _, fn := range roots {
-		r = append(r, fn)
-	}
-	res := rta.Analyze(r, true)
+	var testPkgs, mains []*ssa.Package
+	for _, info := range iprog.InitialPackages() {
+		initialPkg := prog.Package(info.Pkg)
 
-	res.CallGraph.DeleteSyntheticNodes()
+		// Add package to the pointer analysis scope.
+		if initialPkg.Func("main") != nil {
+			mains = append(mains, initialPkg)
+		} else {
+			testPkgs = append(testPkgs, initialPkg)
+		}
+	}
+	if testPkgs != nil {
+		if p := prog.CreateTestMainPackage(testPkgs...); p != nil {
+			mains = append(mains, p)
+		}
+	}
+
+	config := &pointer.Config{
+		Mains:          mains,
+		BuildCallGraph: true,
+	}
+	ptares, err := pointer.Analyze(config)
+	if err != nil {
+		return err // internal error in pointer analysis
+	}
+
+	ptares.CallGraph.DeleteSyntheticNodes()
 	for k, fn := range roots {
 		for _, check := range checks[k] {
-			walk(res.CallGraph, iprog.Fset, check, fn)
+			walk(ptares.CallGraph, iprog.Fset, check, fn)
 		}
 	}
 
@@ -113,11 +147,15 @@ func walk(cg *callgraph.Graph, fset *token.FileSet, leaf *ssa.Function, root *ss
 		if len(check) == 0 {
 			if !hasRoot(stack, rnode) {
 				fmt.Println("trace found with bad root")
-				for _, s := range stack {
+				var s *callgraph.Edge
+				for _, s = range stack {
 					pos := fset.Position(s.Site.Pos())
 					fmt.Print("\t", pos, ": ")
 					fmt.Println(s.Callee.Func)
 				}
+				pos := fset.Position(s.Site.Pos())
+				fmt.Print("\t", pos, ": ")
+				fmt.Println(s.Caller.Func)
 			}
 			return
 		}
