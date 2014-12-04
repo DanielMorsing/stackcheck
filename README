@@ -1,0 +1,35 @@
+STACKCHECK
+
+Stackcheck is a Go static analysis tool that checks that a set of
+functions can only be reached through a given function. This is useful
+for cases where you want to ensure that calls happen on a goroutine,
+or that you don't have lock inversion.
+
+EXAMPLE:
+
+	package main
+
+	func main() {
+		f()
+		g()
+	}
+
+	func f() {
+		// stackcheck: root foo
+		g()
+	}
+
+	func g() {
+		// stackcheck: foo
+	}
+
+Passed to stackcheck, it will check that g() is only called by f and
+it's callees.
+
+WARNING:
+
+I cooked this up as an example of how you can use static analysis
+to make your life easier, but I will not make any guarantees that
+it will actually make your life easier. The search logic is probably
+broken on edge cases, The output formatting is atrocious and the way
+to specify packages is janky. Use at own risk.
