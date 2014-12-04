@@ -24,7 +24,7 @@ EXAMPLE:
 	}
 
 Passed to stackcheck, it will check that g() is only called by f and
-it's callees.
+its callees.
 
 WARNING:
 
