@@ -4,12 +4,13 @@ import (
 	"fmt"
 	"go/build"
 	"go/parser"
+	"go/token"
 	"os"
 	"strings"
 
 	"golang.org/x/tools/astutil"
 	"golang.org/x/tools/go/callgraph"
-	"golang.org/x/tools/go/callgraph/cha"
+	"golang.org/x/tools/go/callgraph/rta"
 	"golang.org/x/tools/go/loader"
 	"golang.org/x/tools/go/ssa"
 )
@@ -72,66 +73,62 @@ func doCallGraph(arg string) error {
 			}
 		}
 	}
+	r := []*ssa.Function{}
+	for _, fn := range roots {
+		r = append(r, fn)
+	}
+	res := rta.Analyze(r, true)
 
-	cg := cha.CallGraph(prog)
-
-	cg.DeleteSyntheticNodes()
+	res.CallGraph.DeleteSyntheticNodes()
 	for k, fn := range roots {
 		for _, check := range checks[k] {
-			walk(cg, check, fn)
+			walk(res.CallGraph, iprog.Fset, check, fn)
 		}
 	}
 
 	return nil
 }
 
-func walk(cg *callgraph.Graph, leaf *ssa.Function, root *ssa.Function) bool {
+func walk(cg *callgraph.Graph, fset *token.FileSet, leaf *ssa.Function, root *ssa.Function) {
 	lnode := cg.Nodes[leaf]
 	rnode := cg.Nodes[root]
 	stack := make([]*callgraph.Edge, 0)
 	seen := make(map[*callgraph.Node]bool)
-	var search func(n *callgraph.Node) bool
-	search = func(n *callgraph.Node) bool {
+	var search func(n *callgraph.Node)
+	search = func(n *callgraph.Node) {
 		if seen[n] {
-			return false
+			return
 		}
 		seen[n] = true
 		if n == rnode {
-			return false
+			return
 		}
-		seenall := true
+		check := []*callgraph.Edge{}
 		for _, e := range n.In {
 			if _, ok := e.Site.(*ssa.Go); ok {
-				seen[e.Caller] = true
-				if !hasRoot(stack, rnode) {
-					fmt.Println("trace found with bad root")
-					fmt.Println(e.Callee)
-					for _, s := range stack {
-						fmt.Println(s.Callee)
-					}
-				}
-				return false
+				continue
 			}
-			stack = append(stack, e) // push
-			if !seen[e.Caller] {
-				search(e.Caller)
-				seenall = false
-			}
-			stack = stack[:len(stack)-1] // pop
+			check = append(check, e)
 		}
-		if seenall {
+		if len(check) == 0 {
 			if !hasRoot(stack, rnode) {
 				fmt.Println("trace found with bad root")
-				fmt.Println(stack[0].Caller)
 				for _, s := range stack {
-					fmt.Println(s.Callee)
+					pos := fset.Position(s.Site.Pos())
+					fmt.Print("\t", pos, ": ")
+					fmt.Println(s.Callee.Func)
 				}
 			}
-			return true
+			return
 		}
-		return false
+		for _, e := range check {
+			stack = append(stack, e) // push
+			search(e.Caller)
+			stack = stack[:len(stack)-1] // pop
+		}
 	}
-	return search(lnode)
+	search(lnode)
+	return
 }
 
 func hasRoot(stack []*callgraph.Edge, rnode *callgraph.Node) bool {
